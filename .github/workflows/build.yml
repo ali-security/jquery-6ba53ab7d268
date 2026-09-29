@@ -1,0 +1,107 @@
+name: Build and pack
+
+# Build-and-pack only: jQuery 1.11.1's tests run on Travis (.travis.yml).
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # jQuery 1.11.1 was built with Node 0.10. JS actions cannot run inside a
+      # node:0.10 container (glibc too old), so check out on the host and run
+      # the build in the container. Mount below a two-level path: npm 2's
+      # `npm pack` drops the `package/` tar prefix when the package sits in a
+      # top-level directory such as /w.
+      NODE_IMAGE: node:0.10
+      SRC: /src/jquery
+      # Registry time machine pinned to the 1.11.1 release date so 2014-era
+      # devDependencies (notably uglify-js) are resolved.
+      NPM_REGISTRY: https://time-machines-npm.sealsecurity.io/
+      RELEASE_DATE: "2014-05-01T18:05:32.863Z"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies and build (grunt)
+        run: |
+          mkdir -p "$RUNNER_TEMP/home"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/home/build -v "$RUNNER_TEMP/home":/home/build \
+            -e NPM_REGISTRY -e RELEASE_DATE \
+            -v "$PWD":"$SRC" -w "$SRC" "$NODE_IMAGE" bash -ec '
+              node -v; npm -v
+              npm config set registry "$NPM_REGISTRY"
+              npm config set //time-machines-npm.sealsecurity.io/:_authToken "$RELEASE_DATE"
+              npm install
+              ./node_modules/.bin/grunt
+            '
+
+      - name: Make CDN release copies (build/release.js makeReleaseCopies)
+        env:
+          CDN_JS: |
+            var fs = require( "fs" ),
+              version = require( "./package.json" ).version,
+              devFile = "dist/jquery.js",
+              minFile = "dist/jquery.min.js",
+              mapFile = "dist/jquery.min.map",
+              cdnFolder = "dist/cdn",
+              releaseFiles = {
+                "jquery-VER.js": devFile,
+                "jquery-VER.min.js": minFile,
+                "jquery-VER.min.map": mapFile,
+                "jquery.js": devFile,
+                "jquery.min.js": minFile,
+                "jquery.min.map": mapFile,
+                "jquery-latest.js": devFile,
+                "jquery-latest.min.js": minFile,
+                "jquery-latest.min.map": mapFile
+              };
+            if ( !fs.existsSync( cdnFolder ) ) {
+              fs.mkdirSync( cdnFolder );
+            }
+            Object.keys( releaseFiles ).forEach(function( key ) {
+              var text,
+                builtFile = releaseFiles[ key ],
+                unpathedFile = key.replace( /VER/g, version ),
+                releaseFile = cdnFolder + "/" + unpathedFile;
+              if ( /\.map$/.test( releaseFile ) ) {
+                text = fs.readFileSync( builtFile, "utf8" )
+                  .replace( /"file":"([^"]+)","sources":\["([^"]+)"\]/,
+                    "\"file\":\"" + unpathedFile.replace( /\.min\.map/, ".min.js" ) +
+                    "\",\"sources\":[\"" + unpathedFile.replace( /\.min\.map/, ".js" ) + "\"]" );
+                fs.writeFileSync( releaseFile, text );
+              } else if ( /\.min\.js$/.test( releaseFile ) ) {
+                text = fs.readFileSync( builtFile, "utf8" )
+                  .replace( /\/\/# sourceMappingURL=\S+/, "" );
+                fs.writeFileSync( releaseFile, text );
+              } else {
+                fs.writeFileSync( releaseFile, fs.readFileSync( builtFile ) );
+              }
+              console.log( releaseFile );
+            });
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e CDN_JS \
+            -v "$PWD":"$SRC" -w "$SRC" "$NODE_IMAGE" node -e "$CDN_JS"
+
+      - name: npm pack
+        run: |
+          # .npmignore does not list .github/ (it did not exist upstream in
+          # 2014); move it aside so the workflow file is not packed.
+          mv .github "$RUNNER_TEMP/dot-github"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/home/build -v "$RUNNER_TEMP/home":/home/build \
+            -v "$PWD":"$SRC" -w "$SRC" "$NODE_IMAGE" npm pack
+          mv "$RUNNER_TEMP/dot-github" .github
+          mkdir -p out
+          mv jquery-1.11.1.tgz out/
+          tar tzvf out/jquery-1.11.1.tgz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jquery-1.11.1-npm
+          path: out/jquery-1.11.1.tgz
+          if-no-files-found: error

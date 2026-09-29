@@ -1,3 +1,37 @@
 language: node_js
 node_js:
 - '0.10'
+dist: focal
+services:
+- docker
+addons:
+  firefox: latest
+  apt:
+    packages:
+    - libasound2
+    - libdbus-glib-1-2
+    - libgtk-3-0
+    - libx11-xcb1
+env:
+  global:
+  - QUNIT_RUNNER_DIR=/tmp/qunit-runner
+  - PHP_IMAGE=public.ecr.aws/docker/library/php:8.3-cli
+before_script:
+# Modern Node for the headless-browser runner only; the package itself keeps
+# building on node 0.10 (the command substitution keeps this shell on 0.10).
+- NODE18="$(nvm install 18 >&2 && nvm which 18)"
+- test -x "$NODE18" && "$NODE18" --version && node --version
+- PATH="$(dirname "$NODE18"):$PATH" npm install --prefix "$QUNIT_RUNNER_DIR" --no-audit --no-fund puppeteer-core@23.11.1
+- firefox --version
+# The ajax tests need PHP. More than one worker is required because
+# test/data/core/dont_return.php sleeps for 30s; PHP 8's built-in server is
+# used because focal's PHP 7.4 built-in server stalls requests under load.
+- docker run -d --name php --network host -e PHP_CLI_SERVER_WORKERS=16 -v "$TRAVIS_BUILD_DIR":/src -w /src "$PHP_IMAGE" php -S 127.0.0.1:8000
+script:
+# Lint + build: dist/jquery.js and dist/jquery.min.js are rebuilt from src/.
+- npm test
+# QUnit browser suite (test/index.html) against the freshly built dist/.
+- curl -sf --retry 10 --retry-delay 2 --retry-connrefused -o /dev/null http://127.0.0.1:8000/test/data/name.php
+- NODE_PATH="$QUNIT_RUNNER_DIR/node_modules" "$NODE18" test/travis-qunit.js
+after_failure:
+- docker logs php 2>&1 | tail -50
